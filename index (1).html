@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ICBS 2026 (GCTU) Attendance Scanner</title>
+<script src="https://unpkg.com/html5-qrcode"></script>
+<style>
+  body { font-family: Arial, sans-serif; background: #f4f6f8; margin: 0; padding: 20px; text-align: center; }
+  .container { max-width: 500px; margin: auto; background: #fff; padding: 20px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,.1); }
+  h1 { margin: 0 0 5px; }
+  .subtitle { color: #666; margin-bottom: 20px; }
+  input, select, button { width: 100%; padding: 13px; margin: 7px 0; font-size: 16px; box-sizing: border-box; border-radius: 8px; border: 1px solid #ccc; }
+  button { background: #111; color: #fff; border: none; cursor: pointer; }
+  button:disabled { background: #aaa; }
+  #reader { width: 100%; margin-top: 15px; }
+  #status { margin-top: 15px; padding: 15px; border-radius: 8px; font-weight: bold; }
+  .success { background: #d9f7df; color: #146c2e; }
+  .error { background: #ffe0e0; color: #a00000; }
+  .warning { background: #fff8e1; color: #8d6e00; }
+  .info { background: #e5efff; color: #174a8b; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>ICBS 2026</h1>
+  <div class="subtitle">GCTU Attendance Scanner</div>
+
+  <input type="password" id="pin" placeholder="Enter Staff PIN" inputmode="numeric" autocomplete="off">
+
+  <select id="day">
+    <option value="">Select Day</option>
+    <option value="Day 1">Day 1</option>
+    <option value="Day 2">Day 2</option>
+    <option value="Day 3">Day 3</option>
+  </select>
+
+  <select id="entrance">
+    <option value="">Select Entrance</option>
+    <option value="Entrance 1">Entrance 1</option>
+    <option value="Entrance 2">Entrance 2</option>
+  </select>
+
+  <select id="cameraSelect"><option value="">Select Camera</option></select>
+
+  <button id="startBtn" onclick="startScanner()">Start Scanner</button>
+  <button id="stopBtn" onclick="stopScanner()" disabled>Stop Scanner</button>
+
+  <div id="reader"></div>
+  <div id="status" class="info">Enter the PIN, select day and entrance, then start the scanner.</div>
+</div>
+
+<script>
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycby1BBBGrC3Lj1hD2TvbyBYvNDZ5HK7u8N4_w0WsktmEUJBBqNJcWTyNh9YjoV1vmIaj/exec";
+// Must match the ID format in the script: ICBS26-GCTU001
+const ID_PATTERN = /^ICBS26-GCTU\d{3,}$/;
+const COOLDOWN_MS = 2500;
+
+let html5QrCode = null;
+let processingScan = false;
+
+function setStatus(message, type) {
+  const el = document.getElementById("status");
+  el.textContent = message;
+  el.className = type || "info";
+}
+
+async function loadCameras() {
+  try {
+    const tmp = await navigator.mediaDevices.getUserMedia({ video: true });
+    tmp.getTracks().forEach(t => t.stop());
+    const cameras = await Html5Qrcode.getCameras();
+    const select = document.getElementById("cameraSelect");
+    select.innerHTML = '<option value="">Select Camera</option>';
+    if (!cameras || cameras.length === 0) { setStatus("No camera found.", "error"); return; }
+    const rear = cameras.find(c => /back|rear|environment/i.test(c.label)) || cameras[0];
+    cameras.forEach(c => {
+      const o = document.createElement("option");
+      o.value = c.id;
+      o.textContent = c.label || "Camera " + c.id;
+      select.appendChild(o);
+    });
+    select.value = rear.id;
+    setStatus("Camera ready. Enter the PIN and start scanning.", "info");
+  } catch (err) {
+    console.error(err);
+    setStatus("Unable to access camera. Please allow camera access.", "error");
+  }
+}
+
+async function startScanner() {
+  const pin = document.getElementById("pin").value.trim();
+  const day = document.getElementById("day").value;
+  const entrance = document.getElementById("entrance").value;
+  const cameraId = document.getElementById("cameraSelect").value;
+
+  if (!pin) return setStatus("Please enter the staff PIN.", "error");
+  if (!day) return setStatus("Please select the conference day.", "error");
+  if (!entrance) return setStatus("Please select the entrance.", "error");
+  if (!cameraId) return setStatus("Please select a camera.", "error");
+
+  if (html5QrCode) { try { await html5QrCode.stop(); } catch (e) {} }
+  html5QrCode = new Html5Qrcode("reader");
+
+  try {
+    await html5QrCode.start(
+      cameraId,
+      { fps: 10, qrbox: { width: 250, height: 250 } },
+      onScanSuccess,
+      function () {}
+    );
+    document.getElementById("startBtn").disabled = true;
+    document.getElementById("stopBtn").disabled = false;
+    setStatus("Scanner active. Scan the participant QR code.", "info");
+  } catch (err) {
+    console.error(err);
+    setStatus("Unable to start camera. Please try again.", "error");
+  }
+}
+
+async function stopScanner() {
+  if (!html5QrCode) return;
+  try { await html5QrCode.stop(); html5QrCode.clear(); } catch (err) { console.error(err); }
+  document.getElementById("startBtn").disabled = false;
+  document.getElementById("stopBtn").disabled = true;
+  setStatus("Scanner stopped.", "info");
+}
+
+function onScanSuccess(decodedText) {
+  if (processingScan) return;
+  const participantId = decodedText.trim();
+
+  if (!ID_PATTERN.test(participantId.toUpperCase())) {
+    processingScan = true;
+    setStatus("Invalid ICBS participant QR code.", "error");
+    setTimeout(() => { processingScan = false; }, COOLDOWN_MS);
+    return;
+  }
+
+  processingScan = true;
+  setStatus("QR detected: " + participantId + ". Recording attendance...", "info");
+  sendAttendance(
+    participantId,
+    document.getElementById("day").value,
+    document.getElementById("entrance").value,
+    document.getElementById("pin").value.trim()
+  );
+}
+
+// JSONP request to Apps Script
+function sendAttendance(participantId, day, entrance, pin) {
+  const callbackName = "icbsCallback_" + Date.now() + "_" + Math.floor(Math.random() * 10000);
+  const script = document.createElement("script");
+  let finished = false;
+
+  function finish() {
+    if (finished) return;
+    finished = true;
+    clearTimeout(timer);
+    if (script.parentNode) script.parentNode.removeChild(script);
+    try { delete window[callbackName]; } catch (e) {}
+    // Cooldown stops the same QR code from being re-read straight away
+    setTimeout(() => { processingScan = false; }, COOLDOWN_MS);
+  }
+
+  const timer = setTimeout(function () {
+    setStatus("No response from the system. Check your connection and scan again.", "error");
+    finish();
+  }, 20000);
+
+  window[callbackName] = function (result) {
+    if (!result) {
+      setStatus("No response received from attendance system.", "error");
+    } else if (result.status === "SUCCESS") {
+      setStatus("✅ " + (result.message || "Attendance recorded."), "success");
+      if (navigator.vibrate) navigator.vibrate(150);
+    } else if (result.status === "DUPLICATE") {
+      setStatus("⚠️ " + (result.message || "Already recorded for this day."), "warning");
+    } else {
+      setStatus("❌ " + (result.message || "Attendance could not be recorded."), "error");
+    }
+    finish();
+  };
+
+  script.onerror = function () {
+    setStatus("Connection error. Check your internet and scan again.", "error");
+    finish();
+  };
+
+  const params = new URLSearchParams({
+    action: "scan",
+    pin: pin,
+    participantId: participantId,
+    day: day,
+    entrance: entrance,
+    callback: callbackName
+  });
+  script.src = APPS_SCRIPT_URL + "?" + params.toString();
+  document.body.appendChild(script);
+}
+
+window.addEventListener("load", loadCameras);
+</script>
+</body>
+</html>
